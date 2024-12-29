@@ -103,6 +103,9 @@ class XiaoHongShuCrawler(AbstractCrawler):
             elif config.CRAWLER_TYPE == "creator":
                 # Get creator's information and their notes and comments
                 await self.get_creators_and_notes()
+            elif config.CRAWLER_TYPE == "comment":
+                # 发表评论
+                await self.add_comment()
             else:
                 pass
 
@@ -514,3 +517,74 @@ class XiaoHongShuCrawler(AbstractCrawler):
             extension_file_name = f"{videoNum}.mp4"
             videoNum += 1
             await xhs_store.update_xhs_note_image(note_id, content, extension_file_name)
+
+    async def add_comment(self) -> None:
+        """发表评论到指定笔记"""
+        utils.logger.info(
+            "[XiaoHongShuCrawler.add_comment] Begin add comments"
+        )
+        try:
+            # 通过关键词搜索获取笔记列表
+            search_id = get_search_id()
+            notes_res = await self.xhs_client.get_note_by_keyword(
+                keyword=config.KEYWORDS,
+                search_id=search_id,
+                page=1,
+                sort=SearchSortType.GENERAL
+            )
+
+            if not notes_res or not notes_res.get("items"):
+                utils.logger.error(
+                    "[XiaoHongShuCrawler.add_comment] No notes found for keyword"
+                )
+                return
+
+            # 获取指定数量的笔记进行评论
+            note_count = 0
+            for item in notes_res.get("items", []):
+                if note_count >= config.NOTE_NUMBER:
+                    break
+                    
+                note_id = item.get("id")
+                xsec_source = item.get("xsec_source", "pc_search")
+                xsec_token = item.get("xsec_token", "")
+                
+                # 获取笔记详情
+                note_detail = await self.get_note_detail_async_task(
+                    note_id=note_id,
+                    xsec_source=xsec_source,
+                    xsec_token=xsec_token,
+                    semaphore=asyncio.Semaphore(1)
+                )
+                
+                if not note_detail:
+                    utils.logger.error(
+                        f"[XiaoHongShuCrawler.add_comment] Failed to get note detail for {note_id}"
+                    )
+                    continue
+
+                # 发表评论
+                comment_data = {
+                    "note_id": note_id,
+                    "content": config.COMMENT_CONTENT,
+                    "at_users": []
+                }
+                result = await self.xhs_client.post_comment(comment_data)
+                if result:
+                    utils.logger.info(
+                        f"[XiaoHongShuCrawler.add_comment] Successfully added comment to note {note_id}"
+                    )
+                    note_count += 1
+                    
+                    # 评论间隔2秒
+                    if note_count < config.NOTE_NUMBER:
+                        await asyncio.sleep(2)
+                else:
+                    utils.logger.error(
+                        f"[XiaoHongShuCrawler.add_comment] Failed to add comment to note {note_id}"
+                    )
+                
+        except Exception as e:
+            utils.logger.error(
+                f"[XiaoHongShuCrawler.add_comment] Error occurred while adding comments: {str(e)}"
+            )

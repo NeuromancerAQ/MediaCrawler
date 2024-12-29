@@ -605,3 +605,33 @@ class XiaoHongShuClient(AbstractApiClient):
             return get_note_dict(html)
         except:
             return None
+
+    async def post_comment(self, comment_data: Dict = None) -> bool:
+        """发表评论
+
+        Args:
+            comment_data (Dict, optional): 评论数据. Defaults to None.
+                如果为None则使用config中的配置
+
+        Returns:
+            bool: 评论是否成功
+        """
+        uri = "/api/sns/web/v1/comment/post"
+        try:
+            if comment_data is None:
+                comment_data = {
+                    "note_id": config.NOTE_ID,
+                    "content": config.COMMENT_CONTENT,
+                    "at_users": []
+                }
+            
+            result = await self.post(uri, data=comment_data)
+            utils.logger.info(
+                f"[XiaoHongShuClient.post_comment] Successfully posted comment to note {comment_data.get('note_id')}"
+            )
+            return bool(result)
+        except Exception as e:
+            utils.logger.error(
+                f"[XiaoHongShuClient.post_comment] Post comment failed: {str(e)}"
+            )
+            return False
