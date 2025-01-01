@@ -15,6 +15,7 @@ import random
 import time
 from asyncio import Task
 from typing import Dict, List, Optional, Tuple
+import json
 
 from playwright.async_api import BrowserContext, BrowserType, Page, async_playwright
 from tenacity import RetryError
@@ -524,66 +525,175 @@ class XiaoHongShuCrawler(AbstractCrawler):
             "[XiaoHongShuCrawler.add_comment] Begin add comments"
         )
         try:
+            # 读取已评论过的笔记记录
+            commented_notes = {}
+            failed_notes = {}  # 记录评论失败的笔记
+            cache_file = "commented_notes.json"
+            failed_file = "failed_notes.json"
+            
+            # 读取已评论记录
+            if os.path.exists(cache_file):
+                try:
+                    with open(cache_file, "r", encoding="utf-8") as f:
+                        commented_notes = json.load(f)
+                except json.JSONDecodeError:
+                    utils.logger.error(
+                        f"[XiaoHongShuCrawler.add_comment] Failed to load cache file: {cache_file}"
+                    )
+                    commented_notes = {}
+                
+            # 读取失败记录
+            if os.path.exists(failed_file):
+                try:
+                    with open(failed_file, "r", encoding="utf-8") as f:
+                        failed_notes = json.load(f)
+                except json.JSONDecodeError:
+                    failed_notes = {}
+            
             # 通过关键词搜索获取笔记列表
-            search_id = get_search_id()
-            notes_res = await self.xhs_client.get_note_by_keyword(
-                keyword=config.KEYWORDS,
-                search_id=search_id,
-                page=1,
-                sort=SearchSortType.GENERAL
-            )
-
-            if not notes_res or not notes_res.get("items"):
-                utils.logger.error(
-                    "[XiaoHongShuCrawler.add_comment] No notes found for keyword"
-                )
-                return
-
-            # 获取指定数量的笔记进行评论
+            page = 1
             note_count = 0
-            for item in notes_res.get("items", []):
-                if note_count >= config.NOTE_NUMBER:
-                    break
-                    
-                note_id = item.get("id")
-                xsec_source = item.get("xsec_source", "pc_search")
-                xsec_token = item.get("xsec_token", "")
-                
-                # 获取笔记详情
-                note_detail = await self.get_note_detail_async_task(
-                    note_id=note_id,
-                    xsec_source=xsec_source,
-                    xsec_token=xsec_token,
-                    semaphore=asyncio.Semaphore(1)
+            
+            while note_count < config.NOTE_NUMBER:
+                search_id = get_search_id()
+                notes_res = await self.xhs_client.get_note_by_keyword(
+                    keyword=config.KEYWORDS,
+                    search_id=search_id,
+                    page=page,
+                    sort=SearchSortType.GENERAL
                 )
-                
-                if not note_detail:
-                    utils.logger.error(
-                        f"[XiaoHongShuCrawler.add_comment] Failed to get note detail for {note_id}"
-                    )
-                    continue
 
-                # 发表评论
-                comment_data = {
-                    "note_id": note_id,
-                    "content": config.COMMENT_CONTENT,
-                    "at_users": []
-                }
-                result = await self.xhs_client.post_comment(comment_data)
-                if result:
-                    utils.logger.info(
-                        f"[XiaoHongShuCrawler.add_comment] Successfully added comment to note {note_id}"
-                    )
-                    note_count += 1
-                    
-                    # 评论间隔2秒
-                    if note_count < config.NOTE_NUMBER:
-                        await asyncio.sleep(2)
-                else:
+                if not notes_res or not notes_res.get("items"):
                     utils.logger.error(
-                        f"[XiaoHongShuCrawler.add_comment] Failed to add comment to note {note_id}"
+                        f"[XiaoHongShuCrawler.add_comment] No notes found for keyword on page {page}"
                     )
-                
+                    break
+
+                for item in notes_res.get("items", []):
+                    if note_count >= config.NOTE_NUMBER:
+                        break
+                    
+                    note_id = item.get("id")
+                    if not note_id:
+                        utils.logger.error(
+                            f"[XiaoHongShuCrawler.add_comment] Failed to get note_id from item: {item}"
+                        )
+                        continue
+                    
+                    # 跳过已评论过的笔记
+                    if note_id in commented_notes:
+                        utils.logger.info(
+                            f"[XiaoHongShuCrawler.add_comment] Skip commented note: {note_id}, title: {commented_notes[note_id]['title']}"
+                        )
+                        continue
+                    
+                    xsec_source = item.get("xsec_source", "pc_search")
+                    xsec_token = item.get("xsec_token", "")
+                    
+                    # 如果token获取失败,跳过该笔记
+                    if not xsec_token:
+                        utils.logger.error(
+                            f"[XiaoHongShuCrawler.add_comment] Failed to get xsec_token for note: {note_id}"
+                        )
+                        continue
+                    
+                    # 获取笔记详情
+                    try:
+                        note_detail = await self.get_note_detail_async_task(
+                            note_id=note_id,
+                            xsec_source=xsec_source,
+                            xsec_token=xsec_token,
+                            semaphore=asyncio.Semaphore(1)
+                        )
+                    except Exception as e:
+                        utils.logger.error(
+                            f"[XiaoHongShuCrawler.add_comment] Error getting note detail for {note_id}: {str(e)}"
+                        )
+                        continue
+                    
+                    if not note_detail:
+                        utils.logger.error(
+                            f"[XiaoHongShuCrawler.add_comment] Failed to get note detail for {note_id}"
+                        )
+                        continue
+
+                    # 发表评论
+                    try:
+                        comment_data = {
+                            "note_id": note_id,
+                            "content": config.COMMENT_CONTENT,
+                            "at_users": []
+                        }
+                        result = await self.xhs_client.post_comment(comment_data)
+                        if result:
+                            note_title = note_detail.get("title", "无标题")
+                            comment_time = utils.get_current_timestamp()
+                            utils.logger.info(
+                                f"[XiaoHongShuCrawler.add_comment] Successfully added comment to note {note_id}, title: {note_title}"
+                            )
+                            
+                            # 记录已评论的笔记信息
+                            commented_notes[note_id] = {
+                                "title": note_title,
+                                "comment_time": comment_time,
+                                "keyword": config.KEYWORDS
+                            }
+                            with open(cache_file, "w", encoding="utf-8") as f:
+                                json.dump(commented_notes, f, ensure_ascii=False, indent=2)
+                            
+                            # 如果之前失败过,从失败记录中移除
+                            if note_id in failed_notes:
+                                del failed_notes[note_id]
+                                with open(failed_file, "w", encoding="utf-8") as f:
+                                    json.dump(failed_notes, f, ensure_ascii=False, indent=2)
+                            
+                            note_count += 1
+                            
+                            # 随机间隔3-10秒
+                            if note_count < config.NOTE_NUMBER:
+                                await asyncio.sleep(random.uniform(3, 10))
+                        else:
+                            # 记录评论失败信息
+                            note_title = note_detail.get("title", "无标题")
+                            failed_notes[note_id] = {
+                                "title": note_title,
+                                "fail_time": utils.get_current_timestamp(),
+                                "keyword": config.KEYWORDS,
+                                "reason": "评论请求失败"
+                            }
+                            with open(failed_file, "w", encoding="utf-8") as f:
+                                json.dump(failed_notes, f, ensure_ascii=False, indent=2)
+                            
+                            utils.logger.error(
+                                f"[XiaoHongShuCrawler.add_comment] Failed to add comment to note {note_id}, title: {note_title}"
+                            )
+                            continue
+                            
+                    except Exception as e:
+                        # 记录评论异常信息
+                        note_title = note_detail.get("title", "无标题")
+                        failed_notes[note_id] = {
+                            "title": note_title,
+                            "fail_time": utils.get_current_timestamp(),
+                            "keyword": config.KEYWORDS,
+                            "reason": str(e)
+                        }
+                        with open(failed_file, "w", encoding="utf-8") as f:
+                            json.dump(failed_notes, f, ensure_ascii=False, indent=2)
+                        
+                        utils.logger.error(
+                            f"[XiaoHongShuCrawler.add_comment] Error occurred while commenting on note {note_id}: {str(e)}"
+                        )
+                        continue
+                    
+                # 如果还需要更多笔记且当前页面有内容，继续下一页
+                if note_count < config.NOTE_NUMBER and notes_res.get("has_more", False):
+                    page += 1
+                    # 翻页时增加随机延迟
+                    await asyncio.sleep(random.uniform(5, 15))
+                else:
+                    break
+
         except Exception as e:
             utils.logger.error(
                 f"[XiaoHongShuCrawler.add_comment] Error occurred while adding comments: {str(e)}"

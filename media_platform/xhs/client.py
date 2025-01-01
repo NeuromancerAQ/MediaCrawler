@@ -626,9 +626,9 @@ class XiaoHongShuClient(AbstractApiClient):
                 }
             
             result = await self.post(uri, data=comment_data)
-            utils.logger.info(
-                f"[XiaoHongShuClient.post_comment] Successfully posted comment to note {comment_data.get('note_id')}"
-            )
+            # utils.logger.info(
+            #     f"[XiaoHongShuClient.post_comment] Successfully posted comment to note {comment_data.get('note_id')}"
+            # )
             return bool(result)
         except Exception as e:
             utils.logger.error(
